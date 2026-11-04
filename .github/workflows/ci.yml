@@ -1,4 +1,4 @@
-name: CI/CD Auth Service
+name: CI/CD Flag Service
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
 
 env:
   AWS_REGION: "us-east-1"
-  ECR_REPOSITORY: "auth-service"
+  ECR_REPOSITORY: "flag-service"
   REGISTRY_URL: "640494160208.dkr.ecr.us-east-1.amazonaws.com"
   GITOPS_REPO: "fiap-dclt/tech-challenge-phase-3-k8s"
   MANIFEST_PATH: "flag-service/deployment.yml"
@@ -20,7 +20,7 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout do Repositório de Código (Auth)
+      - name: Checkout do Repositório de Código (flag)
         uses: actions/checkout@v4
 
       - name: Autenticação na AWS (OIDC)
@@ -64,5 +64,5 @@ jobs:
           git config --global user.name "github-actions-bot"
           git config --global user.email "bot@github.com"
           git add ${{ env.MANIFEST_PATH }}
-          git commit -m "chore: deploy(auth-service) bump image to ${{ github.sha }}"
+          git commit -m "chore: deploy(flag-service) bump image to ${{ github.sha }}"
           git push
