@@ -17,7 +17,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Limpeza extrema do VENV
-RUN pip uninstall -y pip setuptools wheel \
+RUN pip uninstall -y pip wheel \
     && find /opt/venv -type d -name "__pycache__" -exec rm -r {} + \
     && find /opt/venv -name "*.pyc" -delete
 
