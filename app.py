@@ -201,18 +201,49 @@ def update_flag(name):
     if not data:
         return jsonify({"error": "Corpo da requisição obrigatório"}), 400
 
-    fields = []
-    values = []
+    # fields = []
+    # values = []
 
-    # Constrói a query dinamicamente
-    if "description" in data:
-        fields.append("description = %s")
-        values.append(data["description"])
-    if "is_enabled" in data:
-        fields.append("is_enabled = %s")
-        values.append(data["is_enabled"])
+    # # Constrói a query dinamicamente
+    # if "description" in data:
+    #     fields.append("description = %s")
+    #     values.append(data["description"])
+    # if "is_enabled" in data:
+    #     fields.append("is_enabled = %s")
+    #     values.append(data["is_enabled"])
 
-    if not fields:
+    # if not fields:
+    #     return (
+    #         jsonify(
+    #             {
+    #                 "error": "Pelo menos um campo ('description', 'is_enabled') é obrigatório"
+    #             }
+    #         ),
+    #         400,
+    #     )
+
+    # values.append(name)  # Adiciona o 'name' para a cláusula WHERE
+
+    # query = f"UPDATE flags SET {', '.join(fields)} WHERE name = %s RETURNING *"
+
+    # Define consultas SQL estáticas para os campos permitidos.
+    # Evita construção dinâmica da query (Bandit: B608).
+    if "description" in data and "is_enabled" in data:
+        query = (
+            "UPDATE flags SET description = %s, is_enabled = %s "
+            "WHERE name = %s RETURNING *"
+        )
+        values = (data["description"], data["is_enabled"], name)
+
+    elif "description" in data:
+        query = "UPDATE flags SET description = %s " "WHERE name = %s RETURNING *"
+        values = (data["description"], name)
+
+    elif "is_enabled" in data:
+        query = "UPDATE flags SET is_enabled = %s " "WHERE name = %s RETURNING *"
+        values = (data["is_enabled"], name)
+
+    else:
         return (
             jsonify(
                 {
@@ -221,10 +252,6 @@ def update_flag(name):
             ),
             400,
         )
-
-    values.append(name)  # Adiciona o 'name' para a cláusula WHERE
-
-    query = f"UPDATE flags SET {', '.join(fields)} WHERE name = %s RETURNING *"
 
     conn = None
     cur = None
