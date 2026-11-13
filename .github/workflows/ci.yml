@@ -7,9 +7,13 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - ".github/**"
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - ".github/**"
 
 # Variáveis existentes do pipeline de entrega do Flag Service.
 env:
@@ -166,74 +170,74 @@ jobs:
           exit-code: "1"
 
       # Assume a role AWS por OIDC somente em push na main e após os scans.
-      # - name: Authenticate to AWS (OIDC)
-      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      #   uses: aws-actions/configure-aws-credentials@v6
-      #   with:
-      #     role-to-assume: arn:aws:iam::640494160208:role/github-actions-ecr-role-prod
-      #     aws-region: ${{ env.AWS_REGION }}
+      - name: Authenticate to AWS (OIDC)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::640494160208:role/github-actions-ecr-role-prod
+          aws-region: ${{ env.AWS_REGION }}
 
-      # # Autentica o Docker no Amazon Elastic Container Registry.
-      # - name: Log In to Amazon ECR
-      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      #   uses: aws-actions/amazon-ecr-login@v2
+      # Autentica o Docker no Amazon Elastic Container Registry.
+      - name: Log In to Amazon ECR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: aws-actions/amazon-ecr-login@v2
 
-      # # Publica EXATAMENTE a imagem previamente analisada pelo Trivy Image.
-      # - name: Push Docker Image to ECR
-      #   id: push-image
-      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      #   shell: bash
-      #   run: |
-      #     IMAGE_REF="${REGISTRY_URL}/${ECR_REPOSITORY}:${GITHUB_SHA}"
-      #     docker push "$IMAGE_REF"
-      #     echo "new_image=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+      # Publica EXATAMENTE a imagem previamente analisada pelo Trivy Image.
+      - name: Push Docker Image to ECR
+        id: push-image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          IMAGE_REF="${REGISTRY_URL}/${ECR_REPOSITORY}:${GITHUB_SHA}"
+          docker push "$IMAGE_REF"
+          echo "new_image=$IMAGE_REF" >> "$GITHUB_OUTPUT"
 
-      # # Clona o repositório de manifests Kubernetes usando o PAT já configurado.
-      # - name: Checkout GitOps Repository
-      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      #   uses: actions/checkout@v7
-      #   with:
-      #     repository: ${{ env.GITOPS_REPO }}
-      #     token: ${{ secrets.GITOPS_PAT }}
-      #     path: gitops-repo
-      #     persist-credentials: true
+      # Clona o repositório de manifests Kubernetes usando o PAT já configurado.
+      - name: Checkout GitOps Repository
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_PAT }}
+          path: gitops-repo
+          persist-credentials: true
 
-      # # Substitui a imagem do Deployment de flag-service pelo SHA publicado no ECR.
-      # # Confere que a substituição ocorreu antes de tentar realizar um commit.
-      # - name: Update Image Tag in Deployment Manifest
-      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      #   shell: bash
-      #   env:
-      #     NEW_IMAGE: ${{ steps.push-image.outputs.new_image }}
-      #   run: |
-      #     cd gitops-repo
-      #     sed -i "s|image: ${REGISTRY_URL}/${ECR_REPOSITORY}:.*|image: ${NEW_IMAGE}|g" "$MANIFEST_PATH"
-      #     if ! grep -Fq "image: ${NEW_IMAGE}" "$MANIFEST_PATH"; then
-      #       echo "Unable to update the image in $MANIFEST_PATH" >&2
-      #       exit 1
-      #     fi
+      # Substitui a imagem do Deployment de flag-service pelo SHA publicado no ECR.
+      # Confere que a substituição ocorreu antes de tentar realizar um commit.
+      - name: Update Image Tag in Deployment Manifest
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          NEW_IMAGE: ${{ steps.push-image.outputs.new_image }}
+        run: |
+          cd gitops-repo
+          sed -i "s|image: ${REGISTRY_URL}/${ECR_REPOSITORY}:.*|image: ${NEW_IMAGE}|g" "$MANIFEST_PATH"
+          if ! grep -Fq "image: ${NEW_IMAGE}" "$MANIFEST_PATH"; then
+            echo "Unable to update the image in $MANIFEST_PATH" >&2
+            exit 1
+          fi
 
-      # # Cria o commit GitOps e tenta publicá-lo, inclusive em caso de concorrência.
-      # # Falha explicitamente se o push não funcionar após cinco tentativas.
-      # - name: Commit and Push GitOps Changes
-      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      #   shell: bash
-      #   run: |
-      #     cd gitops-repo
-      #     git config user.name "github-actions-bot"
-      #     git config user.email "bot@github.com"
-      #     git add "$MANIFEST_PATH"
-      #     if git diff --cached --quiet; then
-      #       echo "GitOps manifest already references this image."
-      #       exit 0
-      #     fi
-      #     git commit -m "chore: deploy(flag-service) bump image to ${GITHUB_SHA}"
-      #     for attempt in 1 2 3 4 5; do
-      #       git pull --rebase origin main
-      #       if git push origin main; then
-      #         exit 0
-      #       fi
-      #       sleep 5
-      #     done
-      #     echo "Failed to push GitOps changes after 5 attempts." >&2
-      #     exit 1
+      # Cria o commit GitOps e tenta publicá-lo, inclusive em caso de concorrência.
+      # Falha explicitamente se o push não funcionar após cinco tentativas.
+      - name: Commit and Push GitOps Changes
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          cd gitops-repo
+          git config user.name "github-actions-bot"
+          git config user.email "bot@github.com"
+          git add "$MANIFEST_PATH"
+          if git diff --cached --quiet; then
+            echo "GitOps manifest already references this image."
+            exit 0
+          fi
+          git commit -m "chore: deploy(flag-service) bump image to ${GITHUB_SHA}"
+          for attempt in 1 2 3 4 5; do
+            git pull --rebase origin main
+            if git push origin main; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Failed to push GitOps changes after 5 attempts." >&2
+          exit 1
