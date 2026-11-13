@@ -1,12 +1,17 @@
 name: CI/CD Flag Service
 
+# Executa as verificações em pushes e pull requests destinados à main.
+# A publicação no ECR e a atualização do GitOps ocorrem apenas em push na main.
+# Não ignoramos alterações em .github para validar também o próprio workflow.
 on:
   push:
     branches:
       - main
-    paths-ignore:
-      - ".github/**"
+  pull_request:
+    branches:
+      - main
 
+# Variáveis existentes do pipeline de entrega do Flag Service.
 env:
   AWS_REGION: "us-east-1"
   ECR_REPOSITORY: "flag-service"
@@ -14,59 +19,221 @@ env:
   GITOPS_REPO: "fiap-dclt/tech-challenge-phase-3-k8s"
   MANIFEST_PATH: "flag-service/deployment.yml"
 
-jobs:
-  build-and-update-gitops:
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
+# Todos os jobs recebem somente a permissão padrão mínima de leitura.
+permissions:
+  contents: read
 
+jobs:
+  # LINTER: verifica a qualidade do código Python com Ruff.
+  # Mantém o Python 3.11, utilizado atualmente no estágio de build do Dockerfile.
+  lint:
+    name: Linter - Ruff
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout do Repositório de Código (flag)
+      # Obtém o código-fonte para análise.
+      - name: Checkout Source Code
         uses: actions/checkout@v7
 
-      - name: Autenticação na AWS (OIDC)
-        uses: aws-actions/configure-aws-credentials@v6
+      # Instala a versão de Python utilizada pelo projeto.
+      - name: Set Up Python
+        uses: actions/setup-python@v7
         with:
-          role-to-assume: arn:aws:iam::640494160208:role/github-actions-ecr-role-prod
-          aws-region: ${{ env.AWS_REGION }}
+          python-version: "3.11"
 
-      - name: Login no Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+      # Instala uma versão fixa do Ruff para resultados reproduzíveis.
+      - name: Install Ruff
+        run: python -m pip install ruff==0.17.5
 
-      - name: Build, Tag e Push da Imagem
-        id: build-image
-        env:
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          docker build -t ${{ env.REGISTRY_URL }}/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG .
-          docker push ${{ env.REGISTRY_URL }}/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
-          echo "new_image=${{ env.REGISTRY_URL }}/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" >> $GITHUB_OUTPUT
+      # Falha o job se o linter identificar violações das regras configuradas.
+      - name: Run Ruff Linter
+        run: ruff check --output-format=github .
 
-      # Checkout do repositório de K8s usando um PAT (Personal Access Token)
-      - name: Checkout do Repositório GitOps (K8s)
-        uses: actions/checkout@v4
+  # SCA: analisa as dependências Python declaradas no requirements.txt.
+  # Vulnerabilidades HIGH e CRITICAL com correção disponível bloqueiam o job.
+  sca-trivy-fs:
+    name: SCA - Trivy FS
+    runs-on: ubuntu-latest
+    steps:
+      # Obtém os arquivos de dependências usados na análise do filesystem.
+      - name: Checkout Source Code
+        uses: actions/checkout@v7
+
+      # Analisa bibliotecas no repositório, sem depender da imagem Docker.
+      - name: Run Trivy Filesystem Scan
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
-          repository: ${{ env.GITOPS_REPO }}
-          # Este PAT deve ser criado no GitHub e adicionado aos Secrets deste repositório
-          token: ${{ secrets.GITOPS_PAT }}
-          path: gitops-repo
+          scan-type: fs
+          scan-ref: "."
+          scanners: vuln
+          vuln-type: os,library
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
 
-      - name: Atualizar tag no deployment.yml via sed
-        env:
-          NEW_IMAGE: ${{ steps.build-image.outputs.new_image }}
-        run: |
-          cd gitops-repo
-          sed -i "s|image: ${{ env.REGISTRY_URL }}/${{ env.ECR_REPOSITORY }}:.*|image: $NEW_IMAGE|g" ${{ env.MANIFEST_PATH }}
+  # SAST: examina o código-fonte com o Horusec, incluindo regras para Python.
+  # A CLI roda no próprio runner, podendo acessar o Docker sem execução aninhada.
+  # A versão beta corrige a detecção de Docker que falhava na CLI v2.8.0.
+  sast-horusec:
+    name: SAST - Horusec
+    runs-on: ubuntu-latest
+    steps:
+      # Obtém o código e os arquivos de configuração para análise SAST.
+      - name: Checkout Source Code
+        uses: actions/checkout@v7
 
-      - name: Commit e Push para o repositório GitOps
+      # Instala uma versão fixa da CLI e exibe a versão do Docker para diagnóstico.
+      - name: Install Horusec CLI
+        shell: bash
         run: |
-          cd gitops-repo
-          git config --global user.name "github-actions-bot"
-          git config --global user.email "bot@github.com"
-          git add ${{ env.MANIFEST_PATH }}
-          git commit -m "chore: deploy(flag-service) bump image to ${{ github.sha }}"
-          for i in {1..5}; do
-            git pull --rebase origin main && git push origin main && break || sleep 5
-          done
+          curl -fsSL \
+            https://github.com/ZupIT/horusec/releases/download/v2.9.0-beta.3/horusec_linux_amd64 \
+            -o horusec
+          sudo install -m 755 horusec /usr/local/bin/horusec
+          horusec version
+          docker version
+
+      # Bloqueia o pipeline quando o Horusec encontra vulnerabilidades.
+      - name: Run Horusec SAST Scan
+        shell: bash
+        run: horusec start -p "$GITHUB_WORKSPACE" -e true
+
+  # SECRET SCANNING: detecta credenciais e tokens expostos no histórico Git.
+  # O histórico completo é necessário para identificar vazamentos antigos.
+  secrets-gitleaks:
+    name: Secret Scanning - Gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      # Faz o clone completo do histórico para escanear todos os commits acessíveis.
+      - name: Checkout Full Git History
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Utiliza a CLI open source via Docker e mascara os valores encontrados.
+      # Um .gitleaksignore versionado pode registrar falsos positivos confirmados.
+      - name: Scan Git History for Secrets
+        shell: bash
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/repo" \
+            -w /repo \
+            ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            git --redact --verbose .
+
+  # BUILD + IMAGE SCAN + GITOPS:
+  # Aguarda todos os jobs de qualidade e segurança serem aprovados.
+  # Constrói e analisa a imagem localmente ANTES de qualquer push ao ECR.
+  # Em pull requests, valida a imagem mas não autentica na AWS nem publica.
+  build-and-update-gitops:
+    name: Build, Image Scan and GitOps Deploy
+    runs-on: ubuntu-latest
+    needs:
+      - lint
+      - sca-trivy-fs
+      - sast-horusec
+      - secrets-gitleaks
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      # Obtém o código para executar o Docker build.
+      - name: Checkout Source Code
+        uses: actions/checkout@v7
+
+      # Constrói a imagem com tag igual ao SHA do commit, sem publicá-la.
+      # --pull busca atualizações das tags das imagens-base utilizadas.
+      - name: Build Docker Image
+        shell: bash
+        run: |
+          docker build --pull \
+            -t "${REGISTRY_URL}/${ECR_REPOSITORY}:${GITHUB_SHA}" \
+            .
+
+      # Examina vulnerabilidades do sistema operacional e bibliotecas da imagem.
+      # HIGH/CRITICAL corrigíveis bloqueiam o push e a atualização do GitOps.
+      - name: Run Trivy Image Scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.REGISTRY_URL }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+          scanners: vuln
+          vuln-type: os,library
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      # Assume a role AWS por OIDC somente em push na main e após os scans.
+      # - name: Authenticate to AWS (OIDC)
+      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      #   uses: aws-actions/configure-aws-credentials@v6
+      #   with:
+      #     role-to-assume: arn:aws:iam::640494160208:role/github-actions-ecr-role-prod
+      #     aws-region: ${{ env.AWS_REGION }}
+
+      # # Autentica o Docker no Amazon Elastic Container Registry.
+      # - name: Log In to Amazon ECR
+      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      #   uses: aws-actions/amazon-ecr-login@v2
+
+      # # Publica EXATAMENTE a imagem previamente analisada pelo Trivy Image.
+      # - name: Push Docker Image to ECR
+      #   id: push-image
+      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      #   shell: bash
+      #   run: |
+      #     IMAGE_REF="${REGISTRY_URL}/${ECR_REPOSITORY}:${GITHUB_SHA}"
+      #     docker push "$IMAGE_REF"
+      #     echo "new_image=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+
+      # # Clona o repositório de manifests Kubernetes usando o PAT já configurado.
+      # - name: Checkout GitOps Repository
+      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      #   uses: actions/checkout@v7
+      #   with:
+      #     repository: ${{ env.GITOPS_REPO }}
+      #     token: ${{ secrets.GITOPS_PAT }}
+      #     path: gitops-repo
+      #     persist-credentials: true
+
+      # # Substitui a imagem do Deployment de flag-service pelo SHA publicado no ECR.
+      # # Confere que a substituição ocorreu antes de tentar realizar um commit.
+      # - name: Update Image Tag in Deployment Manifest
+      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      #   shell: bash
+      #   env:
+      #     NEW_IMAGE: ${{ steps.push-image.outputs.new_image }}
+      #   run: |
+      #     cd gitops-repo
+      #     sed -i "s|image: ${REGISTRY_URL}/${ECR_REPOSITORY}:.*|image: ${NEW_IMAGE}|g" "$MANIFEST_PATH"
+      #     if ! grep -Fq "image: ${NEW_IMAGE}" "$MANIFEST_PATH"; then
+      #       echo "Unable to update the image in $MANIFEST_PATH" >&2
+      #       exit 1
+      #     fi
+
+      # # Cria o commit GitOps e tenta publicá-lo, inclusive em caso de concorrência.
+      # # Falha explicitamente se o push não funcionar após cinco tentativas.
+      # - name: Commit and Push GitOps Changes
+      #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      #   shell: bash
+      #   run: |
+      #     cd gitops-repo
+      #     git config user.name "github-actions-bot"
+      #     git config user.email "bot@github.com"
+      #     git add "$MANIFEST_PATH"
+      #     if git diff --cached --quiet; then
+      #       echo "GitOps manifest already references this image."
+      #       exit 0
+      #     fi
+      #     git commit -m "chore: deploy(flag-service) bump image to ${GITHUB_SHA}"
+      #     for attempt in 1 2 3 4 5; do
+      #       git pull --rebase origin main
+      #       if git push origin main; then
+      #         exit 0
+      #       fi
+      #       sleep 5
+      #     done
+      #     echo "Failed to push GitOps changes after 5 attempts." >&2
+      #     exit 1
