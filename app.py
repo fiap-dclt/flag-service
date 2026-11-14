@@ -10,6 +10,8 @@ from flask import Flask, jsonify, request
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import SimpleConnectionPool
 
+from telemetry import initialize_telemetry, instrument_flask
+
 # Configura o logging
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -18,6 +20,8 @@ log = logging.getLogger(__name__)
 load_dotenv()
 
 app = Flask(__name__)
+initialize_telemetry("flag-service", database=True, http_client=True)
+instrument_flask(app)
 
 # --- Configuração ---
 DATABASE_URL = os.getenv("DATABASE_URL")

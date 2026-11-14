@@ -52,7 +52,7 @@ ENV PYTHONPATH="/opt/venv/lib/python3.13/site-packages"
 ENV PATH="/opt/venv/bin:$PATH"
 
 # Copia somente o código da aplicação.
-COPY --chown=nonroot:nonroot app.py .
+COPY --chown=nonroot:nonroot app.py telemetry.py .
 
 USER nonroot
 
